@@ -11,11 +11,12 @@
 
 #define MAXCLIENTS 50 
 #define BUFWE 80
-#define MAXBUFFOR 255
+#define MAXBUFFOR 500
 
 struct UserStruct {
     char Username[25];
-    char PublicKey[180];
+    char PublicKeyModulus[400];
+    char PublicKeyExponent[100];
 };
 
 int clientsCounter = 0;
@@ -73,7 +74,8 @@ int main(int argc, char *argv[])
     for (;;) 
     { 
         int procesID;
-        klientDl= sizeof(clientAddress); 
+        klientDl= sizeof(clientAddress);
+        //Akceptuj połączenie
         if ((clientSocket = accept(serverSocket, (struct sockaddr *) &clientAddress, &klientDl)) < 0)
         {
             perror("accept() -nie udalo się"); 
@@ -93,7 +95,7 @@ int main(int argc, char *argv[])
         }
 
         printf("Przetwarzam klienta %s\n", inet_ntoa(clientAddress.sin_addr));
-
+        //Przyjmij dane do logowania od klienta
         if (read(clientSocket,ConnectionBuffor,MAXBUFFOR) < 0)
 		{
 			perror("read()");
@@ -102,10 +104,12 @@ int main(int argc, char *argv[])
 
         cJSON *json = cJSON_Parse(ConnectionBuffor);
         int requestCode = json->child->valueint;
+        //Jezeli klient prosił o logowanie dodaj go do listy klientów i odeślij liste
         if(requestCode == 100)
         {
             strcpy(usersArray[clientsCounter].Username,json->child->next->valuestring);
-            strcpy(usersArray[clientsCounter].PublicKey,json->child->next->next->valuestring);
+            strcpy(usersArray[clientsCounter].PublicKeyModulus,json->child->next->next->valuestring);
+            strcpy(usersArray[clientsCounter].PublicKeyExponent,json->child->next->next->next->valuestring);
 
             //length do zmiany na ClientsCounter
             char* JSONUserList = CreateJSONUserList(usersArray,1,101,"Zalogowano");
@@ -192,7 +196,8 @@ char* CreateJSONUserList(struct UserStruct usersArray[],int length,int returnCod
         cJSON *user = cJSON_CreateObject();
 
         cJSON_AddStringToObject(user, "username", usersArray[index].Username);
-        cJSON_AddStringToObject(user, "publicKey", usersArray[index].PublicKey);
+        cJSON_AddStringToObject(user, "publicKeyModulus", usersArray[index].PublicKeyModulus);
+        cJSON_AddStringToObject(user, "publicKeyExponent", usersArray[index].PublicKeyExponent);
 
         cJSON_AddItemToArray(users,user);
     }
