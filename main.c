@@ -15,8 +15,17 @@
 #include <time.h>
 #include <stdbool.h>
 
+/**
+* @brief Maksymalna ilość osób na serwerze
+ */
 #define MAXCLIENTS 50 
+/**
+* @brief Maksymalny rozmiar bufora dla struktur z informacja o pliku
+ */
 #define BUFSENDFILESTRUCT 4096
+/**
+* @brief Maksymalny rozmiar bufora
+ */
 #define MAXBUFFOR 1024
 
 /**
@@ -39,11 +48,27 @@ struct linked_list
     struct linked_list *next;
 };
 
+/**
+* @brief Alias na strukture listy
+ */
 typedef struct linked_list node;
-node *head=NULL, *last=NULL;
+/**
+* @brief Adres na początek listy
+ */
+node *head=NULL, 
+/**
+* @brief Adres na koniec listy
+ */
+node *last=NULL;
 
+/**
+* @brief Struktura przechowujaca argumenty wątku klienta
+ */
 struct WatekArg { int klientGniazdo;};
 
+/**
+* @brief Licznik przechowujący informacje o ilości osób na serwerze
+ */
 int clientsCounter = 0;
 
 /**
@@ -192,7 +217,11 @@ node* search_item_by_mod(char modulus[]);
 node* search_item_by_socket(int socket);
 
 
-
+/**
+* @brief Głowna funkcja serwera zajmująca sie logowaniem użytkowników i przedzielaniu ich do nowo utworzonych wątków
+* @param argc Ilość argumentów podanych w wywołaniu
+* @param argv Tablica z parametrami wywołania
+ */
 int main(int argc, char *argv[])
 { 
     int serverSocket; 
