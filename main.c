@@ -13,6 +13,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <time.h>
+#include <stdbool.h>
 
 #define MAXCLIENTS 50 
 #define BUFSENDFILESTRUCT 4096
@@ -23,11 +24,12 @@ struct UserStruct {
     char PublicKeyModulus[400];
     char PublicKeyExponent[100];
     int  Socket;
+    bool Blocked;
 };
 
 struct linked_list
 {
-    struct UserStruct user;
+    struct UserStruct *user;
     struct linked_list *next;
 };
 
@@ -38,20 +40,27 @@ struct WatekArg { int klientGniazdo;};
 
 int clientsCounter = 0;
 
-void sig_child(int s);
 char* CreateJSONUserList(int returnCode,char* message);
 int SaveFile(char* filename,char* content);
 char* CreateJSONFileInfo(int returnCode,char * encryptedName,char * encryptedKey, char* encryptedIV);
-void *Wykonaj(void *watekArg);
+void *ClientThread(void *watekArg);
 int LoadFile(char* filename,char* outarry);
+int SendRefreshUserList();
+void ClearClientThread(int klientGniazdo,bool sendMessage);
+int GetRandomNumber();
+void ClearFolder(char* folderName);
+int LoginUser(int clientSocket, void *ConnectionBuffor,cJSON *json);
 
 void print_linked_list();
 void insert_at_last(struct UserStruct newUser);
 void delete_item(int socket);
-int search_item(char modulus[]);
+node* search_item_by_mod(char modulus[]);
+node* search_item_by_socket(int socket);
 
 
-int main(int argc, char *argv[]) 
+
+
+int main(int argc, char *argv[])
 { 
     int serverSocket; 
     int clientSocket; 
@@ -59,7 +68,6 @@ int main(int argc, char *argv[])
     struct sockaddr_in clientAddress; /* adres klienta */ 
     unsigned short serverPort; 
     unsigned int klientDl; /* długość struktury adresowej */
-    struct UserStruct usersArray[MAXCLIENTS];
     char ConnectionBuffor[MAXBUFFOR];
     pthread_t watekID;
     struct WatekArg *watekArg;
@@ -74,7 +82,7 @@ int main(int argc, char *argv[])
     /* brak spr *//* Utwórz gniazdo dla przychodzących połączeń */ 
     if ((serverSocket = socket(PF_INET, SOCK_STREAM, 0)) < 0) 
     { 
-        perror("socket() -nie udalo się"); 
+        perror("socket() -nie udalo się");
         exit(1); 
     } 
 
@@ -84,19 +92,17 @@ int main(int argc, char *argv[])
     serverAddress.sin_addr.s_addr = htonl(INADDR_ANY); 
     serverAddress.sin_port = htons(serverPort);/* Przypisz gniazdu lokalny adres */ 
     if (bind(serverSocket,(struct sockaddr *) &serverAddress,sizeof(serverAddress)) < 0) 
-    { 
-        perror("bind() -nie udalo się"); 
+    {
+        perror("bind() -nie udalo się");
         exit(1); 
     } 
     
     /* Ustaw gniazdo w trybie biernym -przyjmowania połączeń*/ 
     if (listen(serverSocket, MAXCLIENTS) < 0) 
-    { 
-        perror("listen() -nie udalo się"); 
+    {
+        perror("listen() -nie udalo się");
         exit(1); 
-    } 
-
-    signal(SIGCHLD, sig_child);
+    }
 
     /* Obsługuj nadchodzące połączenia */ 
     for (;;) 
@@ -106,14 +112,13 @@ int main(int argc, char *argv[])
         //Akceptuj połączenie
         if ((clientSocket = accept(serverSocket, (struct sockaddr *) &clientAddress, &klientDl)) < 0)
         {
-            perror("accept() -nie udalo się"); 
-            exit(1); 
+            perror("accept() -nie udalo się");
+            continue;
         } 
 
         if(clientsCounter >= MAXCLIENTS)
         {
-            char* JSONUserList = CreateJSONUserList(102,"Nie udało się połączyć z serwerem zbyt wiele klientów");
-            if (write(clientSocket, JSONUserList, strlen(JSONUserList)) < 0)
+            if (write(clientSocket, "102", strlen("102")) < 0)
             {
                 perror("write() - nie udalo się");
             }
@@ -122,60 +127,66 @@ int main(int argc, char *argv[])
             continue;
         }
 
+        clientsCounter++;
         printf("Przetwarzam klienta %s\n", inet_ntoa(clientAddress.sin_addr));
         //Przyjmij dane do logowania od klienta
         if (read(clientSocket,ConnectionBuffor,MAXBUFFOR) < 0)
 		{
-			perror("read()");
-			exit(1);
+			perror("Nie udało się zalogować użytkownika!");
+			close(clientSocket);
+			clientsCounter--;
+            continue;
 		}
 
         cJSON *json = cJSON_Parse(ConnectionBuffor);
+        if(json == NULL)
+        {
+            perror("Nie udało się zalogować użytkownika!");
+            close(clientSocket);
+            clientsCounter--;
+            continue;
+        }
+
         int requestCode = json->child->valueint;
         //Jezeli klient prosił o logowanie dodaj go do listy klientów i odeślij liste
         if(requestCode == 100)
         {
-            struct UserStruct newUser;
-
-            strcpy(newUser.Username,json->child->next->valuestring);
-            strcpy(newUser.PublicKeyModulus,json->child->next->next->valuestring);
-            strcpy(newUser.PublicKeyExponent,json->child->next->next->next->valuestring);
-            newUser.Socket = clientSocket;
-
-            insert_at_last(newUser);
-
-            char* JSONUserList = CreateJSONUserList(101,"Zalogowano");
-
-            if (write(clientSocket, JSONUserList, strlen(JSONUserList)) < 0)
-            {
-                perror("write() - nie udalo się");
+            if(LoginUser(clientSocket, ConnectionBuffor, json) != 0)
                 continue;
-            }
-
         }
 
         cJSON_Delete(json);
-        //ObslugaKlienta(clientSocket);
-        ///Tymczasowo w komentarz bo wieloprecosorowych nie da sie debugowac
 
         if ((watekArg = (struct WatekArg *) malloc(sizeof(struct WatekArg))) == NULL)
         {
-            //TODO OBSLUZYC
+            if (write(clientSocket, "500", strlen("500")) < 0)
+            {
+                printf("Nie udało się wysłać komunikatu o błedzie serwera do klienta %d",clientSocket);
+            }
+
+            close(clientSocket);
+            clientsCounter--;
+            delete_item(clientSocket);
         }
+
         watekArg -> klientGniazdo = clientSocket;
 
-        if (pthread_create(&watekID, NULL, Wykonaj, (void *) watekArg) != 0)
+        if (pthread_create(&watekID, NULL, ClientThread, (void *) watekArg) != 0)
         {
-            //TODO OBSLUZYC
+            if (write(clientSocket, "500", strlen("500")) < 0)
+            {
+                printf("Nie udało się wysłać komunikatu o błedzie serwera do klienta %d",clientSocket);
+            }
+
+            close(clientSocket);
+            clientsCounter--;
+            delete_item(clientSocket);
         }
 
-    } 
-
-    close (serverSocket);
-    return 0;
+    }
 }
 
-void *Wykonaj(void *watekArg)
+void *ClientThread(void *watekArg)
 { 
     char JSONFileStruct[BUFSENDFILESTRUCT];
     int length; /* Odbierz komunikat od klienta */
@@ -191,7 +202,7 @@ void *Wykonaj(void *watekArg)
 
         if (length <= 0) {
             perror("read() -nie udalo się");
-            exit(-1);
+            ClearClientThread(klientGniazdo,false);
         }
 
         cJSON *json = cJSON_Parse(JSONFileStruct);
@@ -205,11 +216,16 @@ void *Wykonaj(void *watekArg)
             char* EncryptedIV = json->child->next->next->next->next->valuestring;
             char* Receiver = json->child->next->next->next->next->next->valuestring;
 
-            int receiverSocket = search_item(Receiver);
+            node* sender = search_item_by_socket(klientGniazdo);
+            sender->user->Blocked = true;
+
+            node* receiver = search_item_by_mod(Receiver);
+            receiver->user->Blocked = true;
+            int receiverSocket = receiver->user->Socket;
 
             time_t t = time(NULL);
             struct tm tm = *localtime(&t);
-            int intFolderName = receiverSocket + tm.tm_mday + tm.tm_hour + tm.tm_min;
+            int intFolderName = receiverSocket + tm.tm_mday + tm.tm_hour + tm.tm_min + GetRandomNumber();
             char folderName[12];
             sprintf(folderName, "%d", intFolderName);
 
@@ -218,7 +234,7 @@ void *Wykonaj(void *watekArg)
                 if(mkdir(folderName, 0700) == -1)
                 {
                     printf("Nie udało się stworzyć folderu\n");
-                    continue;
+                    ClearClientThread(klientGniazdo,true);
                 }
 
                 chdir(folderName);
@@ -231,14 +247,15 @@ void *Wykonaj(void *watekArg)
                 if (write(klientGniazdo, "106", strlen("106")) < 0)
                 {
                     perror("write() - nie udalo się");
-                    continue;
+                    ClearClientThread(klientGniazdo,false);
                 }
 
                 int fd = open("File", O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 
                 if (fd == -1)
                 {
-                    fprintf(stderr, "Could not open destination file, using stdout.\n");
+                    fprintf(stderr, "Could not open destination file.\n");
+                    ClearClientThread(klientGniazdo,true);
                 }
 
                 int readCounter = 0;
@@ -246,10 +263,9 @@ void *Wykonaj(void *watekArg)
                 int writeCounter;
                 char* bufptr;
 
-
-                //zmienic na while
                 while((readCounter = read(klientGniazdo, buf, MAXBUFFOR)) > 0)
                 {
+
                     bufptr = buf;
 
                     writeCounter = write(fd, bufptr, readCounter);
@@ -257,7 +273,7 @@ void *Wykonaj(void *watekArg)
                     if(writeCounter < 0)
                     {
                         printf("Blad przy zapisie do pliku!\n");
-                        exit(-1);
+                        ClearClientThread(klientGniazdo,true);
                     }
                 }
                 close(fd);
@@ -267,10 +283,11 @@ void *Wykonaj(void *watekArg)
                 cJSON *requestJSON = cJSON_CreateObject();
                 cJSON_AddNumberToObject(requestJSON,"requestCode",107);
                 cJSON_AddNumberToObject(requestJSON,"folderName",intFolderName);
+                cJSON_AddStringToObject(requestJSON,"sender",sender->user->Username);
 
                 request = cJSON_Print(requestJSON);
                 if (request == NULL) {
-                    fprintf(stderr, "Failed to parse UserList.\n");
+                    fprintf(stderr, "Failed to parse request.\n");
                 }
 
                 cJSON_Delete(requestJSON);
@@ -281,8 +298,9 @@ void *Wykonaj(void *watekArg)
                     perror("write() - nie udalo się");
                     continue;
                 }
-
-
+                chdir("..");
+                sender->user->Blocked = false;
+                ClearClientThread(klientGniazdo,false);
             }
 
         }
@@ -303,17 +321,17 @@ void *Wykonaj(void *watekArg)
             if (write(klientGniazdo, fileInfo, strlen(fileInfo)) < 0)
             {
                 perror("write() - nie udalo się");
-                continue;
+                ClearClientThread(klientGniazdo,false);
             }
 
-            char requestCodeChar[MAXBUFFOR];
+            char requestCodeChar[3];
             int length; /* Odbierz komunikat od klienta */
 
-            length = read(klientGniazdo, requestCodeChar, MAXBUFFOR);
+            length = read(klientGniazdo, requestCodeChar, 3);
 
             if (length <= 0) {
                 perror("read() -nie udalo się");
-                exit(-1);
+                ClearClientThread(klientGniazdo,false);
             }
 
             int requestCode = atoi(requestCodeChar);
@@ -328,10 +346,11 @@ void *Wykonaj(void *watekArg)
                 if (fd == -1)
                 {
                     fprintf(stderr, "Could not open file for reading!\n");
-                    continue;
+                    ClearClientThread(klientGniazdo,true);
                 }
                 int readCounter = 0;
                 int writeCounter = 0;
+
                 /* czytaj plik i przesylaj do klienta */
                 while((readCounter = read(fd, buf, MAXBUFFOR)) > 0)
                 {
@@ -346,57 +365,61 @@ void *Wykonaj(void *watekArg)
                         if (writeCounter == -1)
                         {
                             fprintf(stderr, "Could not write file to client!\n");
-                            close(klientGniazdo);
-                            continue;
+                            break;
                         }
                     }
                 }
+                ClearFolder(folderName);
+                node* receiver = search_item_by_socket(klientGniazdo);
+                receiver->user->Blocked = false;
+                ClearClientThread(klientGniazdo,false);
             }
 
 
         }
         else if(requestCode == 109)
         {
-            //TODO ODRZUCIC PLIK I GO WYJEBAC
+            char* folderName = json->child->next->valuestring;
+
+            if (chdir(folderName) != 0)
+                perror("chdir() failed");
+
+            ClearFolder(folderName);
+
+            ClearClientThread(klientGniazdo,true);
         }
-/*
-        //Wyslanie do klienta wiadomosci o zgode na przyjecie pliku
-        if (write(receiverSocket, "107", strlen("107")) < 0)
-        {
-            perror("write() - nie udalo się");
-            continue;
-        }
-
-                    char* fileInfo =  CreateJSONFileInfo(109,EncryptedName,EncryptedKey,EncryptedIV);
-
-            if (write(receiverSocket, fileInfo, strlen(fileInfo)) < 0)
-            {
-                perror("write() - nie udalo się");
-                continue;
-            }
-
-
-            //Przyjecie statusu zgody lub nie na przyjecie pliku
-            char statusCodeReceiver[MAXBUFFOR];
-            int lengthReceiver = read(receiverSocket, statusCodeReceiver, 3);
-
-            if (lengthReceiver < 0) {
-                perror("read() -nie udalo się");
-            }
-
-            int status = atoi(statusCodeReceiver);
-*/
-
     }
 
     close(klientGniazdo); 
 }
 
-
-void sig_child(int s)
+int LoginUser(int clientSocket, void *ConnectionBuffor, cJSON *json)
 {
-    while ( waitpid(-1, 0, WNOHANG) > 0 )
-    clientsCounter-- ;
+    struct UserStruct newUser;
+
+    strcpy(newUser.Username, json->child->next->valuestring);
+    strcpy(newUser.PublicKeyModulus, json->child->next->next->valuestring);
+    strcpy(newUser.PublicKeyExponent, json->child->next->next->next->valuestring);
+    newUser.Socket = clientSocket;
+    newUser.Blocked = false;
+
+    if (write(clientSocket, "101", strlen("101")) < 0) {
+        perror("write() - nie udalo się wysłać listy użytkowników");
+        close(clientSocket);
+        clientsCounter--;
+        return -1;
+    }
+
+    if (read(clientSocket, ConnectionBuffor, MAXBUFFOR) < 0) {
+        perror("Nie udało się zalogować użytkownika!");
+        close(clientSocket);
+        clientsCounter--;
+        return -1;
+    }
+
+    insert_at_last(newUser);
+    SendRefreshUserList();
+    return 0;
 }
 
 //Tworzy lite userow jako obiekt typu JSON
@@ -422,9 +445,10 @@ char* CreateJSONUserList(int returnCode,char* message)
     {
         cJSON *user = cJSON_CreateObject();
 
-        cJSON_AddStringToObject(user, "username", myList->user.Username);
-        cJSON_AddStringToObject(user, "publicKeyModulus", myList->user.PublicKeyModulus);
-        cJSON_AddStringToObject(user, "publicKeyExponent", myList->user.PublicKeyExponent);
+        cJSON_AddStringToObject(user, "username", myList->user->Username);
+        cJSON_AddStringToObject(user, "message", message);
+        cJSON_AddStringToObject(user, "publicKeyModulus", myList->user->PublicKeyModulus);
+        cJSON_AddStringToObject(user, "publicKeyExponent", myList->user->PublicKeyExponent);
 
         cJSON_AddItemToArray(users,user);
 
@@ -508,11 +532,12 @@ void insert_at_last(struct UserStruct newUser)
 {
     node *temp_node;
     temp_node = (node *) malloc(sizeof(node));
+    temp_node->user = (struct UserStruct*) malloc(sizeof(struct UserStruct));
 
-    temp_node->user.Socket = newUser.Socket;
-    strcpy (temp_node->user.Username,newUser.Username);
-    strcpy (temp_node->user.PublicKeyModulus,newUser.PublicKeyModulus);
-    strcpy (temp_node->user.PublicKeyExponent,newUser.PublicKeyExponent);
+    temp_node->user->Socket = newUser.Socket;
+    strcpy (temp_node->user->Username,newUser.Username);
+    strcpy (temp_node->user->PublicKeyModulus,newUser.PublicKeyModulus);
+    strcpy (temp_node->user->PublicKeyExponent,newUser.PublicKeyExponent);
     temp_node->next=NULL;
 
     //For the 1st element
@@ -526,7 +551,7 @@ void insert_at_last(struct UserStruct newUser)
         last->next=temp_node;
         last=temp_node;
     }
-
+    print_linked_list();
 }
 
 void delete_item(int socket)
@@ -536,7 +561,7 @@ void delete_item(int socket)
 
     while(myNode!=NULL)
     {
-        if(myNode->user.Socket==socket)
+        if(myNode->user->Socket == socket)
         {
             if(previous==NULL)
                 head = myNode->next;
@@ -546,6 +571,7 @@ void delete_item(int socket)
             //printf("%d uzytkowik o podanym socketcie zostal usuniety\n",s);
 
             flag = 1;
+            free(myNode->user);
             free(myNode); //need to free up the memory to prevent memory leak
             break;
         }
@@ -556,27 +582,50 @@ void delete_item(int socket)
 
     if(flag==0)
         printf("Key not found!\n");
+
+    print_linked_list();
 }
 
 
-int search_item(char modulus[])
+node* search_item_by_mod(char modulus[])
 {
     node *searchNode = head;
 
 
     while(searchNode!=NULL)
     {
-        if(strcmp(searchNode->user.PublicKeyModulus, modulus) == 0)
+        if(strcmp(searchNode->user->PublicKeyModulus, modulus) == 0)
         {
-            printf("Zwracany socket: %d\n",searchNode->user.Socket);
+            printf("Zwracany user po mod: %d\n",searchNode->user->Socket);
 
-            return searchNode->user.Socket;
+            return searchNode;
         }
         else
             searchNode = searchNode->next;
     }
 
-    return -1;
+    return NULL;
+
+}
+
+node* search_item_by_socket(int socket)
+{
+    node *searchNode = head;
+
+
+    while(searchNode!=NULL)
+    {
+        if(searchNode->user->Socket == socket)
+        {
+            printf("Zwracany user po sokecie: %d\n",searchNode->user->Socket);
+
+            return searchNode;
+        }
+        else
+            searchNode = searchNode->next;
+    }
+
+    return NULL;
 
 }
 
@@ -590,12 +639,80 @@ void print_linked_list()
 
     while(myList!=NULL)
     {
-        printf("Sokcet:%d \n", myList->user.Socket);
-        printf("Username:%d \n", myList->user.Username);
-        printf("PublicKeyModulus:%d \n", myList->user.PublicKeyModulus);
-        printf("PublicKeyExponent:%d \n\n", myList->user.PublicKeyExponent);
+        printf("Sokcet:%d \n", myList->user->Socket);
+        printf("Username:%s \n", myList->user->Username);
+        printf("PublicKeyModulus:%s \n", myList->user->PublicKeyModulus);
+        printf("PublicKeyExponent:%s \n\n", myList->user->PublicKeyExponent);
 
         myList = myList->next;
     }
     puts("");
+}
+
+int SendRefreshUserList()
+{
+    char* JSONUserList = CreateJSONUserList(112,"Zalogowano");
+
+    node *myList;
+    myList = head;
+
+    while(myList!=NULL)
+    {
+        if (myList->user->Blocked == false && write(myList->user->Socket, JSONUserList, strlen(JSONUserList)) < 0)
+        {
+            printf("Nie udało się wysłać nowej listy do klienta %d",myList->user->Socket);
+            continue;
+        }
+
+        myList = myList->next;
+    }
+}
+
+void ClearClientThread(int klientGniazdo,bool sendMessage)
+{
+    if(sendMessage)
+    {
+        if (write(klientGniazdo, "500", strlen("500")) < 0)
+        {
+            printf("Nie udało się wysłać komunikatu o błedzie serwera do klienta %d\n",klientGniazdo);
+        }
+    }
+
+    close(klientGniazdo);
+    delete_item(klientGniazdo);
+    SendRefreshUserList();
+    clientsCounter--;
+    int ret = -1;
+    pthread_exit(&ret);
+}
+
+int GetRandomNumber()
+{
+    int i, zarodek;
+    time_t tt;
+    zarodek = time(&tt);
+    srand(zarodek);
+
+    return rand()%10000;
+}
+
+void ClearFolder(char* folderName)
+{
+
+    if (remove("FileName") != 0)
+        perror("remove() failed");
+
+    if (remove("EncryptedKey") != 0)
+        perror("remove() failed");
+
+    if (remove("EncryptedIV") != 0)
+        perror("remove() failed");
+
+    if (remove("File") != 0)
+        perror("remove() failed");
+
+    chdir("..");
+
+    if (remove(folderName) != 0)
+        perror("remove() failed");
 }
