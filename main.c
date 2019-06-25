@@ -284,7 +284,7 @@ int main(int argc, char *argv[])
         //Jezeli klient prosił o logowanie dodaj go do listy klientów i odeślij liste
         if(requestCode == 100)
         {
-            if(LoginUser(clientSocket, ConnectionBuffor, json) != 0)
+            if(LoginUser(clientSocket, json) != 0)
                 continue;
         }
 
@@ -442,9 +442,9 @@ int SendFileFromServer(int klientGniazdo, const cJSON *json) {
 int SaveFileOnServer(int klientGniazdo, const cJSON *json) {
     struct stat st = {0};
     char *EncryptedName = json->child->next->valuestring;
-    char *EncryptedKey = json->child->next->next->next->valuestring;
-    char *EncryptedIV = json->child->next->next->next->next->valuestring;
-    char *Receiver = json->child->next->next->next->next->next->valuestring;
+    char *EncryptedKey = json->child->next->next->valuestring;
+    char *EncryptedIV = json->child->next->next->next->valuestring;
+    char *Receiver = json->child->next->next->next->next->valuestring;
 
     node *sender = search_item_by_socket(klientGniazdo);
     sender->user->Blocked = true;
